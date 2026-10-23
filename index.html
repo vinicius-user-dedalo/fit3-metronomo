@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Metrônomo Fit3</title>
+<!-- Protocolo SAP do Galaxy Fit3 portado de yuriyurin/Fit3-App e GokulArumugam/Fit3Bridge (GPL-3.0-only).
+     Este arquivo também é GPL-3.0-only. -->
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --fg:#1b1b1b; --muted:#6b6b6b; --accent:#2f6fde; --ok:#1f8a4c; --warn:#b65c00; --line:#e3e3df; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111; --card:#1c1c1c; --fg:#eee; --muted:#9a9a9a; --accent:#6fa0ff; --ok:#4cc17e; --warn:#ffa34d; --line:#2c2c2c; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:480px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:4px 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px; }
+  button { font:inherit; border:0; border-radius:10px; padding:14px; width:100%; background:var(--accent); color:#fff; font-weight:600; }
+  button.sec { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button:disabled { opacity:.4; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .bpm { font-size:56px; font-weight:700; text-align:center; font-variant-numeric:tabular-nums; }
+  .bpm small { font-size:16px; color:var(--muted); font-weight:500; }
+  input[type=range] { width:100%; }
+  .step { flex:0 0 56px; padding:10px 0; }
+  select { font:inherit; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); width:100%; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  .status { font-size:14px; color:var(--muted); }
+  .status b { color:var(--fg); }
+  .beats { display:flex; gap:8px; justify-content:center; margin:12px 0 4px; }
+  .dot { width:18px; height:18px; border-radius:50%; background:var(--line); transition:background .05s; }
+  .dot.on { background:var(--accent); }
+  .dot.on.first { background:var(--ok); }
+  .stats { font-size:14px; font-variant-numeric:tabular-nums; }
+  .stats div { display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px dashed var(--line); }
+  #log { font:12px/1.35 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; max-height:220px; overflow:auto; color:var(--muted); }
+  .warn { color:var(--warn); }
+  details summary { cursor:pointer; color:var(--muted); font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Metrônomo Fit3</h1>
+
+  <div class="card" id="unsupported" hidden>
+    <p class="warn"><b>Este navegador não tem Web Bluetooth.</b></p>
+    <p class="status">Abra esta página no <b>Chrome para Android</b>, num endereço https ou liberado nas flags (veja o LEIA-ME).</p>
+  </div>
+
+  <div class="card">
+    <p class="status" id="state">Desconectado. Antes: <b>force a parada do Galaxy Wearable e do Galaxy Fit3 Plugin</b> (Configurações &gt; Apps) para liberar a pulseira.</p>
+    <button id="connect">Conectar à pulseira</button>
+  </div>
+
+  <div class="card">
+    <div class="bpm"><span id="bpmVal">60</span> <small>bpm</small></div>
+    <input type="range" id="bpm" min="30" max="200" value="60">
+    <div class="row" style="margin-top:8px">
+      <button class="sec step" data-d="-5">−5</button>
+      <button class="sec step" data-d="-1">−1</button>
+      <span style="flex:1"></span>
+      <button class="sec step" data-d="1">+1</button>
+      <button class="sec step" data-d="5">+5</button>
+    </div>
+    <div class="row">
+      <div style="flex:1"><label for="meter">Compasso</label>
+        <select id="meter"><option>2</option><option>3</option><option selected>4</option><option>6</option></select></div>
+      <div style="flex:1"><label for="mode">Vibração</label>
+        <select id="mode">
+          <option value="notificacao">Notificação (curta)</option>
+          <option value="chamada">Chamada (cortada)</option>
+        </select></div>
+    </div>
+    <div class="beats" id="beats"></div>
+    <button id="toggle" disabled>Iniciar</button>
+  </div>
+
+  <div class="card stats" id="stats">
+    <div><span>Batidas enviadas</span><span id="sSent">0</span></div>
+    <div><span>Confirmadas pela pulseira</span><span id="sAck">–</span></div>
+    <div><span>Atraso até a pulseira (média)</span><span id="sLat">–</span></div>
+    <div><span>Variação do atraso (desvio)</span><span id="sJit">–</span></div>
+    <p class="status" style="margin:8px 0 0">Variação abaixo de ~10 ms: dá para tocar junto. Acima de ~30 ms: dá para sentir.
+      Isso mede até a pulseira <i>receber</i>; a vibração em si pode somar algum atraso.</p>
+  </div>
+
+  <div class="card"><details><summary>Registro técnico</summary><div id="log"></div></details></div>
+</main>
+
+<script>
+"use strict";
+// ======================= protocolo (port de Fit3Bridge/web/fit3.js) =======================
+const UUID_SVC = "00001a1a-0000-1000-8000-00805f9b34fb";
+const UUID_NOTIFY = "797ae4e9-2e58-4fe8-b48d-b5c79599fb9b";
+const UUID_WRITE = "63e30bad-4206-4596-839f-e47cbf7a4b5d";
+const SVC = { OOBE: 1, CALL: 3, NOTI: 7, SETTINGS: 11 };
+const LOCALE_PT_BR = 82;
+
+function crc16(d) { let c = 0; for (const b of d) { c ^= b; for (let i = 0; i < 8; i++) c = c & 1 ? (c >>> 1) ^ 0xa001 : c >>> 1; } return c & 0xffff; }
+const crcB = (d) => { const v = crc16(d); return [v >>> 8, v & 0xff]; };
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+const isCap = (d) => d.length === 105 && d[0] === 104 && d[1] === 0x14;
+
+function encBody(body, mtu) {
+  if (mtu < 256) return [body.length, body.length, ...body, ...crcB(body)];
+  const len = [body.length >>> 8, body.length & 0xff];
+  return [...len, ...crcB(len), ...body, ...crcB(body)];
+}
+function encodeMessage(svc, msg, mtu) {
+  const prefix = mtu < 256 ? 2 : 4;
+  if (4 + msg.length + prefix + 2 <= mtu) return [encBody([0, 0x40, svc, svc, ...msg], mtu)];
+  const firstCap = mtu - prefix - 6, contCap = mtu - prefix - 4, frames = [];
+  let off = Math.min(firstCap, msg.length), seq = 0;
+  frames.push(encBody([2, seq++, svc, svc, ...msg.slice(0, off)], mtu));
+  while (off < msg.length) {
+    const take = Math.min(contCap, msg.length - off), kind = off + take >= msg.length ? 3 : 2;
+    frames.push(encBody([kind << 1, seq++, ...msg.slice(off, off + take)], mtu)); off += take;
+  }
+  return frames;
+}
+function decodeFrame(f) {
+  if (f.length < 8) throw new Error("curto");
+  const shortOk = f[0] === f[1] && f[0] + 4 === f.length;
+  const lc = crcB([f[0], f[1]]);
+  const longOk = f.length >= 10 && ((f[0] << 8) | f[1]) + 6 === f.length && f[2] === lc[0] && f[3] === lc[1];
+  if (!shortOk && !longOk) throw new Error("prefixo");
+  const body = f.slice(shortOk ? 2 : 4, f.length - 2), c = crcB(body);
+  if (f[f.length - 2] !== c[0] || f[f.length - 1] !== c[1]) throw new Error("crc");
+  if (body[0] >>> 6) throw new Error("controle");
+  const kind = (body[0] >>> 1) & 3, first = kind < 2;
+  return { kind, seq: body[1] & 15, stream: body[1] >>> 5, svc: first ? body[2] : null, payload: body.slice(first ? 4 : 2) };
+}
+class Reassembler {
+  constructor() { this.reset(); }
+  reset() { this.svc = null; this.stream = -1; this.next = 0; this.data = []; }
+  push(fr) {
+    if (fr.kind === 0) { this.reset(); return { svc: fr.svc, msg: fr.payload }; }
+    if (fr.kind === 1) { this.reset(); if (fr.seq) return null; Object.assign(this, { svc: fr.svc, stream: fr.stream, next: 1, data: [...fr.payload] }); return null; }
+    if (this.svc == null || fr.stream !== this.stream || fr.seq !== this.next) { this.reset(); return null; }
+    this.data.push(...fr.payload); this.next++;
+    if (fr.kind !== 3) return null;
+    const out = { svc: this.svc, msg: this.data }; this.reset(); return out;
+  }
+}
+const enc = new TextEncoder();
+function utf8(s, max) { const out = []; for (const ch of s) { const b = enc.encode(ch); if (out.length + b.length > max) break; out.push(...b); } return out; }
+const le32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
+function le64(n) { const o = []; let v = BigInt(n); for (let i = 0; i < 8; i++) { o.push(Number(v & 255n)); v >>= 8n; } return o; }
+const txt = (id, s, max = 60) => { const b = utf8(s, max); return [id, b.length, ...b]; };
+
+function initSettings(date, offsetSec, locale) {
+  const e = [...enc.encode(String(Math.floor(date.getTime() / 1000)))], a = Math.abs(offsetSec);
+  return [0x83, 1, locale & 255, locale >>> 8, 2, 0, 3, e.length, ...e, 4, offsetSec < 0 ? 1 : 0, a & 255, (a >>> 8) & 255, 5, 1];
+}
+function notification(seq, title, text) {
+  const body = utf8(text, 100);
+  return [0x80, 10, 0, 1, 1, ...le32(seq), ...txt(6, "20"), 2, ...le64(Date.now()), ...txt(3, title),
+    4, body.length & 255, body.length >>> 8, ...body, ...txt(14, "Metronomo"), 15, 1, 16, 0, ...txt(18, "local.fit3.metronomo")];
+}
+const deleteNotification = (seq) => [0x01, 0x01, ...le32(seq)];
+const AGENT = "com.samsung.android.providers.sacall.SACallHandlerService";
+const callContact = (name, number) => [0x82, 7, 0, 1, 7, 1, 0, 0, 0, ...txt(5, AGENT, 127), 6, ...le64(Date.now()), ...txt(4, name, 127), ...txt(3, number, 127), 9, 0];
+
+// ======================= conexão =======================
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+function log(m) { const t = new Date().toTimeString().slice(0, 8); logEl.textContent += `[${t}] ${m}\n`; logEl.scrollTop = 1e9; }
+function setState(html) { $("state").innerHTML = html; }
+
+let device, writeChar, notifyChar, mtu = 0, withResp = true;
+const reasm = new Reassembler();
+let waiter = null, capResolve = null;
+const acks = new Map();
+let writeChain = Promise.resolve();
+
+function onNotify(ev) {
+  const t = performance.now();
+  const d = Array.from(new Uint8Array(ev.target.value.buffer));
+  if (isCap(d)) { capResolve && capResolve(d); return; }
+  let fr; try { fr = decodeFrame(d); } catch (e) { log("frame ignorado: " + hex(d)); return; }
+  const r = reasm.push(fr); if (!r) return;
+  const m = r.msg;
+  if (r.svc === SVC.NOTI && m.length === 8 && m[0] === 0x40 && m[1] === 1 && m[6] === 11) {
+    acks.set((m[2] | (m[3] << 8) | (m[4] << 16) | (m[5] << 24)) >>> 0, t); updateStats(); return;
+  }
+  log(`<- svc ${r.svc}: ${hex(m).slice(0, 60)}`);
+  if (waiter && waiter.svc === r.svc && (m[0] & 0x40) && (m[0] & 0x3f) === waiter.id) { const w = waiter; waiter = null; w.resolve(m); }
+}
+function rawWrite(bytes) {
+  const u = new Uint8Array(bytes);
+  const p = writeChain.then(() => withResp ? writeChar.writeValueWithResponse(u) : writeChar.writeValueWithoutResponse(u));
+  writeChain = p.catch(() => {});
+  return p;
+}
+async function send(svc, msg) { for (const f of encodeMessage(svc, msg, mtu)) await rawWrite(f); }
+function request(svc, msg, id, ms = 5000) {
+  return new Promise(async (resolve) => {
+    const timer = setTimeout(() => { if (waiter && waiter.id === id) waiter = null; resolve(null); }, ms);
+    waiter = { svc, id, resolve: (m) => { clearTimeout(timer); resolve(m); } };
+    try { await send(svc, msg); } catch (e) { log("erro: " + e.message); }
+  });
+}
+
+async function connect() {
+  $("connect").disabled = true;
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: "Galaxy Fit3" }], optionalServices: [UUID_SVC] });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    setState(`Conectando a <b>${device.name}</b>...`);
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(UUID_SVC);
+    notifyChar = await svc.getCharacteristic(UUID_NOTIFY);
+    writeChar = await svc.getCharacteristic(UUID_WRITE);
+    withResp = !!writeChar.properties.write;
+    const capP = new Promise((res, rej) => { capResolve = res; setTimeout(() => rej(new Error("a pulseira não enviou o handshake")), 10000); });
+    notifyChar.addEventListener("characteristicvaluechanged", onNotify);
+    await notifyChar.startNotifications();
+    log("notificações ativas, aguardando handshake");
+    const cap = await capP;
+    mtu = (cap[0x2c] << 8) | cap[0x2d];
+    const resp = cap.slice(); resp[1] = 0x15; await rawWrite(resp);
+    log("handshake OK, MTU " + mtu);
+    const info = await request(SVC.OOBE, [1, 4, 2, 0, 0, 0, 5, 0, 14], 1);
+    const fw = info && String.fromCharCode(...info.map((b) => b < 128 ? b : 46)).match(/R390[A-Z0-9]{7,12}/);
+    await request(SVC.OOBE, [2, 1, 0], 2);
+    await request(SVC.OOBE, initSettings(new Date(), -new Date().getTimezoneOffset() * 60, LOCALE_PT_BR), 3);
+    await request(SVC.OOBE, [0x84, 1, 1], 4);
+    const bat = await request(SVC.SETTINGS, [2], 2);
+    let batTxt = ""; if (bat) { const i = bat.indexOf(5, 1); if (i > 0) batTxt = ` · bateria ${bat[i + 1]}%`; }
+    await request(SVC.NOTI, [0x0d], 13, 3000);
+    setState(`Conectado a <b>${device.name}</b>${fw ? " · " + fw[0] : ""}${batTxt}`);
+    $("connect").textContent = "Desconectar"; $("connect").disabled = false; $("toggle").disabled = false;
+  } catch (e) {
+    log("falha: " + e.message);
+    let hint = e.message;
+    if (/permissions policy|not allowed|SecurityError/i.test(e.name + e.message)) hint = "o navegador bloqueou o Bluetooth nesta página (precisa de https ou da flag do Chrome).";
+    else if (/handshake/.test(e.message)) hint = "a pulseira conectou mas não respondeu. Confirme que o Galaxy Wearable está parado e tente de novo.";
+    else if (/User cancelled/i.test(e.message)) hint = "busca cancelada.";
+    setState(`<span class="warn">Não conectou: ${hint}</span>`);
+    try { device && device.gatt.connected && device.gatt.disconnect(); } catch {}
+    $("connect").disabled = false;
+  }
+}
+function onDisconnected() { stop(); setState("Desconectado."); $("connect").textContent = "Conectar à pulseira"; $("toggle").disabled = true; log("desconectado"); }
+
+// ======================= metrônomo =======================
+let running = false, beatN = 0, startT = 0, seqBase = 0, sent = [], wakeLock = null;
+const bpm = () => +$("bpm").value;
+
+function drawDots() {
+  const n = +$("meter").value, el = $("beats"); el.innerHTML = "";
+  for (let i = 0; i < n; i++) { const d = document.createElement("div"); d.className = "dot" + (i === 0 ? " first" : ""); el.appendChild(d); }
+}
+function flash(i) { [...$("beats").children].forEach((d, k) => d.classList.toggle("on", k === i)); }
+
+function sleepUntil(t) {
+  return new Promise((res) => {
+    const tick = () => { const d = t - performance.now(); if (d <= 0) return res(); d > 12 ? setTimeout(tick, d - 10) : (d > 1 ? setTimeout(tick, 0) : res()); };
+    tick();
+  });
+}
+
+async function loop() {
+  const period = 60000 / bpm(), meter = +$("meter").value, mode = $("mode").value;
+  startT = performance.now() + 300; beatN = 0;
+  if (mode === "chamada") await send(SVC.CALL, [0x08, 0x01]);
+  while (running) {
+    const ideal = startT + beatN * period, beat = beatN % meter;
+    await sleepUntil(ideal);
+    if (!running) break;
+    flash(beat);
+    const seq = (seqBase + beatN) >>> 0;
+    try {
+      if (mode === "notificacao") {
+        sent.push({ seq, ideal });
+        send(SVC.NOTI, notification(seq, String(beat + 1), `${bpm()} bpm`)).catch((e) => log("erro: " + e.message));
+        setTimeout(() => running && send(SVC.NOTI, deleteNotification(seq)).catch(() => {}), period / 2);
+      } else {
+        send(SVC.CALL, callContact(String(beat + 1), `${bpm()} bpm`)).catch(() => {});
+        send(SVC.CALL, [0x03, 0x01]).catch(() => {});
+        setTimeout(() => send(SVC.CALL, [0x03, 0x00]).catch(() => {}), Math.min(180, period * 0.6));
+        sent.push({ seq: -1, ideal });
+      }
+    } catch (e) { log("erro: " + e.message); }
+    beatN++; updateStats();
+  }
+}
+async function start() {
+  running = true; sent = []; acks.clear(); seqBase = (Date.now() % 1e6) * 100 + 1;
+  $("toggle").textContent = "Parar";
+  try { wakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+  loop();
+}
+function stop() {
+  if (!running) return;
+  running = false; $("toggle").textContent = "Iniciar"; flash(-1);
+  try { wakeLock && wakeLock.release(); } catch {}
+  if (writeChar && device?.gatt.connected) {
+    ($("mode").value === "chamada" ? send(SVC.CALL, [0x03, 0x00]) : send(SVC.NOTI, [0x08])).catch(() => {});
+  }
+}
+function updateStats() {
+  $("sSent").textContent = sent.length;
+  const lat = sent.filter((s) => acks.has(s.seq)).map((s) => acks.get(s.seq) - s.ideal);
+  if ($("mode").value !== "notificacao") { $("sAck").textContent = "– (só no modo notificação)"; return; }
+  $("sAck").textContent = `${lat.length}/${sent.length}`;
+  if (lat.length < 2) return;
+  const mean = lat.reduce((a, b) => a + b, 0) / lat.length;
+  const sd = Math.sqrt(lat.reduce((a, b) => a + (b - mean) ** 2, 0) / lat.length);
+  $("sLat").textContent = mean.toFixed(0) + " ms";
+  $("sJit").textContent = sd.toFixed(1) + " ms";
+}
+
+// ======================= UI =======================
+function setBpm(v) { v = Math.max(30, Math.min(200, v)); $("bpm").value = v; $("bpmVal").textContent = v; if (running) { stop(); setTimeout(start, 50); } }
+$("bpm").addEventListener("input", (e) => setBpm(+e.target.value));
+document.querySelectorAll("[data-d]").forEach((b) => b.addEventListener("click", () => setBpm(bpm() + +b.dataset.d)));
+$("meter").addEventListener("change", () => { drawDots(); if (running) { stop(); setTimeout(start, 50); } });
+$("mode").addEventListener("change", () => { if (running) { stop(); setTimeout(start, 50); } });
+$("toggle").addEventListener("click", () => running ? stop() : start());
+$("connect").addEventListener("click", () => device?.gatt.connected ? device.gatt.disconnect() : connect());
+document.addEventListener("visibilitychange", () => { if (document.hidden && running) log("aviso: com a tela apagada ou em outro app o Chrome atrasa o metrônomo"); });
+drawDots();
+if (!navigator.bluetooth) { $("unsupported").hidden = false; $("connect").disabled = true; }
+</script>
+</body>
+</html>
